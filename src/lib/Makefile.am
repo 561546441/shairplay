@@ -6,7 +6,7 @@ else
 FAIRPLAY_SOURCE = fairplay_dummy.c
 endif
 
-SUBDIRS = crypto alac curve25519 ed25519 $(PLAYFAIR_SUBDIR)
+SUBDIRS = crypto alac curve25519 ed25519 $(PLAYFAIR_SUBDIR) plist
 
 AM_CPPFLAGS = -I$(top_srcdir)/include/shairplay
 
@@ -15,7 +15,7 @@ libshairplay_la_SOURCES = base64.c base64.h digest.c digest.h dnssd.c dnssdint.h
 libshairplay_la_CPPFLAGS = $(AM_CPPFLAGS)
 
 # This library depends on 3rd party libraries
-libshairplay_la_LIBADD = crypto/libcrypto.la alac/libalac.la curve25519/libcurve25519.la ed25519/libed25519.la $(PLAYFAIR_LIBADD)
+libshairplay_la_LIBADD = crypto/libcrypto.la alac/libalac.la curve25519/libcurve25519.la ed25519/libed25519.la $(PLAYFAIR_LIBADD) plist/libplist.la
 libshairplay_la_LDFLAGS = -no-undefined -version-info 0:0:0
 
 ### Update -version-info above with the following rules

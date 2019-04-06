@@ -88,5 +88,6 @@ AC_CONFIG_FILES(
 	[src/lib/curve25519/Makefile]
 	[src/lib/ed25519/Makefile]
 	[src/lib/playfair/Makefile]
+	[src/lib/plist/Makefile]
 )
 AC_OUTPUT

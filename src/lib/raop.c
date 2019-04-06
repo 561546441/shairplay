@@ -224,6 +224,8 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 	if (require_auth) {
 		/* Do nothing in case of authentication request */
 		handler = &raop_handler_none;
+	} else if (!strcmp(method, "GET") && !strcmp(url, "/info")) {
+		handler = &raop_handler_info;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/pair-setup")) {
 		handler = &raop_handler_pairsetup;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/pair-verify")) {

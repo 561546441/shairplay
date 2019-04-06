@@ -32,6 +32,7 @@ struct pairing_s {
 
 typedef enum {
 	STATUS_INITIAL,
+    STATUS_SETUP,
 	STATUS_HANDSHAKE,
 	STATUS_FINISHED
 } status_t;
@@ -99,6 +100,14 @@ pairing_get_public_key(pairing_t *pairing, unsigned char public_key[32])
 	memcpy(public_key, pairing->ed_public, 32);
 }
 
+void
+pairing_get_ecdh_secret_key(pairing_session_t *session, unsigned char ecdh_secret[32])
+{
+	assert(session);
+	memcpy(ecdh_secret, session->ecdh_secret, 32);
+}
+
+
 pairing_session_t *
 pairing_session_init(pairing_t *pairing)
 {
@@ -117,6 +126,23 @@ pairing_session_init(pairing_t *pairing)
 	session->status = STATUS_INITIAL;
 
 	return session;
+}
+
+void
+pairing_session_set_setup_status(pairing_session_t *session)
+{
+    assert(session);
+    session->status = STATUS_SETUP;
+}
+
+int
+pairing_session_check_handshake_status(pairing_session_t *session)
+{
+    assert(session);
+    if (session->status != STATUS_SETUP) {
+        return -1;
+    }
+    return 0;
 }
 
 int
@@ -172,6 +198,7 @@ pairing_session_get_signature(pairing_session_t *session, unsigned char signatur
 	/* First sign the public ECDH keys of both parties */
 	memcpy(&sig_msg[0], session->ecdh_ours, 32);
 	memcpy(&sig_msg[32], session->ecdh_theirs, 32);
+
 	ed25519_sign(signature, sig_msg, sizeof(sig_msg), session->ed_ours, session->ed_private);
 
 	/* Then encrypt the result with keys derived from the shared secret */
@@ -214,16 +241,6 @@ pairing_session_finish(pairing_session_t *session, const unsigned char signature
 
 	session->status = STATUS_FINISHED;
 	return 0;
-}
-
-int
-pairing_session_derive_key(pairing_session_t *session,
-                           const unsigned char *salt, unsigned int saltlen,
-                           unsigned char *key, unsigned int keylen)
-{
-	assert(session);
-
-	return derive_key_internal(session, salt, saltlen, key, keylen);
 }
 
 void
