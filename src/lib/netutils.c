@@ -164,6 +164,7 @@ netutils_get_address(void *sockaddr, int *length)
 	return NULL;
 }
 
+// src是ip地址
 int
 netutils_parse_address(int family, const char *src, void *dst, int dstlen)
 {
@@ -186,7 +187,7 @@ netutils_parse_address(int family, const char *src, void *dst, int dstlen)
 
 	ret = getaddrinfo(src, NULL, &hints, &result);
 	if (ret != 0) {
-		return -1;
+		return ret;
 	}
 
 	length = -1;

@@ -19,13 +19,20 @@
 
 #include "raop_buffer.h"
 #include "raop_rtp.h"
-#include "utils.h"
 
 #include <stdint.h>
+#include "ed25519/sha512.h"
 #include "crypto/crypto.h"
-#include "alac/alac.h"
+#include "aes.h"
+#include "compat.h"
+// #include "fdk-aac/libAACdec/include/aacdecoder_lib.h"
+// #include "fdk-aac/libFDK/include/clz.h"
+// #include "fdk-aac/libSYS/include/FDK_audio.h"
+#include <fdk-aac/aacdecoder_lib.h>
+#include <fdk-aac/aacdecoder_lib.h>
+#include "stream.h"
 
-#define RAOP_BUFFER_LENGTH 32
+#define RAOP_BUFFER_LENGTH 512
 
 typedef struct {
 	/* Packet available */
@@ -38,24 +45,26 @@ typedef struct {
 	unsigned int timestamp;
 	unsigned int ssrc;
 
-	/* Audio buffer of valid length */
+	/* 内存大小 */
 	int audio_buffer_size;
+	/* 解码后长度 */
 	int audio_buffer_len;
 	void *audio_buffer;
 } raop_buffer_entry_t;
 
 struct raop_buffer_s {
-	/* AES key and IV */
+    logger_t *logger;
+	/* 解密使用的key and IV */
 	unsigned char aeskey[RAOP_AESKEY_LEN];
 	unsigned char aesiv[RAOP_AESIV_LEN];
 
-	/* ALAC decoder */
-	ALACSpecificConfig alacConfig;
-	alac_file *alac;
+    HANDLE_AACDECODER phandle;
 
 	/* First and last seqnum */
 	int is_empty;
+	// 播放的序号
 	unsigned short first_seqnum;
+	// 收到的序号
 	unsigned short last_seqnum;
 
 	/* RTP buffer entries */
@@ -66,147 +75,112 @@ struct raop_buffer_s {
 	void *buffer;
 };
 
+static int fdk_flags = 0;
 
+/* period size 480 samples */
+#define N_SAMPLE 480
 
-static int
-get_fmtp_info(ALACSpecificConfig *config, const char *fmtp)
+static int pcm_pkt_size = 4 * N_SAMPLE;
+
+HANDLE_AACDECODER
+create_fdk_aac_decoder(logger_t *logger)
 {
-	int intarr[12];
-	char *original;
-	char *strptr;
-	int i;
-
-	/* Parse fmtp string to integers */
-	original = strptr = strdup(fmtp);
-	for (i=0; i<12; i++) {
-		if (strptr == NULL) {
-			free(original);
-			return -1;
-		}
-		intarr[i] = atoi(utils_strsep(&strptr, " "));
-	}
-	free(original);
-	original = strptr = NULL;
-
-	/* Fill the config struct */
-	config->frameLength = intarr[1];
-	config->compatibleVersion = intarr[2];
-	config->bitDepth = intarr[3];
-	config->pb = intarr[4];
-	config->mb = intarr[5];
-	config->kb = intarr[6];
-	config->numChannels = intarr[7];
-	config->maxRun = intarr[8];
-	config->maxFrameBytes = intarr[9];
-	config->avgBitRate = intarr[10];
-	config->sampleRate = intarr[11];
-
-	/* Validate supported audio types */
-	if (config->bitDepth != 16) {
-		return -2;
-	}
-	if (config->numChannels != 2) {
-		return -3;
-	}
-
-	return 0;
+    int ret = 0;
+    UINT nrOfLayers = 1;
+	HANDLE_AACDECODER phandle = aacDecoder_Open(TT_MP4_RAW, nrOfLayers);
+    if (phandle == NULL) {
+        logger_log(logger, LOGGER_DEBUG, "aacDecoder open faild!\n");
+        return NULL;
+    }
+    /* ASC config binary data */
+	UCHAR eld_conf[] = { 0xF8, 0xE8, 0x50, 0x00 };
+	UCHAR *conf[] = { eld_conf };
+	static UINT conf_len = sizeof(eld_conf);
+    ret = aacDecoder_ConfigRaw(phandle, conf, &conf_len);
+    if (ret != AAC_DEC_OK) {
+        logger_log(logger, LOGGER_DEBUG, "Unable to set configRaw\n");
+        return NULL;
+    }
+    CStreamInfo *aac_stream_info = aacDecoder_GetStreamInfo(phandle);
+    if (aac_stream_info == NULL) {
+        logger_log(logger, LOGGER_DEBUG, "aacDecoder_GetStreamInfo failed!\n");
+        return NULL;
+    }
+    logger_log(logger, LOGGER_DEBUG, "> stream info: channel = %d\tsample_rate = %d\tframe_size = %d\taot = %d\tbitrate = %d\n",   \
+            aac_stream_info->channelConfig, aac_stream_info->aacSampleRate,
+           aac_stream_info->aacSamplesPerFrame, aac_stream_info->aot, aac_stream_info->bitRate);
+    return phandle;
 }
 
-static void
-set_decoder_info(alac_file *alac, ALACSpecificConfig *config)
+void
+raop_buffer_init_key_iv(raop_buffer_t *raop_buffer,
+                     const unsigned char *aeskey,
+                     const unsigned char *aesiv,
+                     const unsigned char *ecdh_secret)
 {
-	unsigned char decoder_info[48];
-	memset(decoder_info, 0, sizeof(decoder_info));
 
-#define SET_UINT16(buf, value)do{\
-	(buf)[0] = (unsigned char)((value) >> 8);\
-	(buf)[1] = (unsigned char)(value);\
-	}while(0)
-
-#define SET_UINT32(buf, value)do{\
-	(buf)[0] = (unsigned char)((value) >> 24);\
-	(buf)[1] = (unsigned char)((value) >> 16);\
-	(buf)[2] = (unsigned char)((value) >> 8);\
-	(buf)[3] = (unsigned char)(value);\
-	}while(0)
-
-	/* Construct decoder info buffer */
-	SET_UINT32(&decoder_info[24], config->frameLength);
-	decoder_info[28] = config->compatibleVersion;
-	decoder_info[29] = config->bitDepth;
-	decoder_info[30] = config->pb;
-	decoder_info[31] = config->mb;
-	decoder_info[32] = config->kb;
-	decoder_info[33] = config->numChannels;
-	SET_UINT16(&decoder_info[34], config->maxRun);
-	SET_UINT32(&decoder_info[36], config->maxFrameBytes);
-	SET_UINT32(&decoder_info[40], config->avgBitRate);
-	SET_UINT32(&decoder_info[44], config->sampleRate);
-	alac_set_info(alac, (char *) decoder_info);
+    // 初始化key
+    unsigned char eaeskey[64];
+    memcpy(eaeskey, aeskey, 16);
+    sha512_context ctx;
+    sha512_init(&ctx);
+    sha512_update(&ctx, eaeskey, 16);
+    sha512_update(&ctx, ecdh_secret, 32);
+    sha512_final(&ctx, eaeskey);
+    memcpy(raop_buffer->aeskey, eaeskey, 16);
+    memcpy(raop_buffer->aesiv, aesiv, RAOP_AESIV_LEN);
+#ifdef DUMP_AUDIO
+    if (file_keyiv != NULL) {
+        fwrite(raop_buffer->aeskey, 16, 1, file_keyiv);
+        fwrite(raop_buffer->aesiv, 16, 1, file_keyiv);
+        fclose(file_keyiv);
+    }
+#endif
 }
 
 raop_buffer_t *
-raop_buffer_init(const char *rtpmap,
-                 const char *fmtp,
+raop_buffer_init(logger_t *logger,
                  const unsigned char *aeskey,
-                 const unsigned char *aesiv)
+                 const unsigned char *aesiv,
+                 const unsigned char *ecdh_secret)
 {
 	raop_buffer_t *raop_buffer;
 	int audio_buffer_size;
-	ALACSpecificConfig *alacConfig;
-	int i;
-
-        assert(rtpmap);
-	assert(fmtp);
 	assert(aeskey);
-	assert(aesiv);
-
+    assert(aesiv);
+    assert(ecdh_secret);
 	raop_buffer = calloc(1, sizeof(raop_buffer_t));
 	if (!raop_buffer) {
 		return NULL;
 	}
-
-	/* Parse fmtp information */
-	alacConfig = &raop_buffer->alacConfig;
-	if (get_fmtp_info(alacConfig, fmtp) < 0) {
-		free(raop_buffer);
-		return NULL;
-	}
+    raop_buffer->logger = logger;
 
 	/* Allocate the output audio buffers */
-	audio_buffer_size = alacConfig->frameLength *
-	                    alacConfig->numChannels *
-	                    alacConfig->bitDepth/8;
-	raop_buffer->buffer_size = audio_buffer_size *
-	                           RAOP_BUFFER_LENGTH;
+    audio_buffer_size = 480 * 2 * 2;
+    raop_buffer->phandle = create_fdk_aac_decoder(logger);
+    if (!raop_buffer->phandle) {
+        free(raop_buffer);
+        return NULL;
+    }
+	raop_buffer->buffer_size = audio_buffer_size * RAOP_BUFFER_LENGTH;
 	raop_buffer->buffer = malloc(raop_buffer->buffer_size);
 	if (!raop_buffer->buffer) {
+        if (raop_buffer->phandle) {
+            free(raop_buffer->phandle);
+        }
 		free(raop_buffer);
 		return NULL;
 	}
-	for (i=0; i<RAOP_BUFFER_LENGTH; i++) {
+	for (int i=0; i<RAOP_BUFFER_LENGTH; i++) {
 		raop_buffer_entry_t *entry = &raop_buffer->entries[i];
 		entry->audio_buffer_size = audio_buffer_size;
 		entry->audio_buffer_len = 0;
 		entry->audio_buffer = (char *)raop_buffer->buffer+i*audio_buffer_size;
 	}
-
-	/* Initialize ALAC decoder */
-	raop_buffer->alac = alac_create(alacConfig->bitDepth,
-	                                alacConfig->numChannels);
-	if (!raop_buffer->alac) {
-		free(raop_buffer->buffer);
-		free(raop_buffer);
-		return NULL;
-	}
-	set_decoder_info(raop_buffer->alac, alacConfig);
-
-	/* Initialize AES keys */
-	memcpy(raop_buffer->aeskey, aeskey, RAOP_AESKEY_LEN);
-	memcpy(raop_buffer->aesiv, aesiv, RAOP_AESIV_LEN);
-
+    raop_buffer_init_key_iv(raop_buffer, aeskey, aesiv, ecdh_secret);
 	/* Mark buffer as empty */
 	raop_buffer->is_empty = 1;
+
 	return raop_buffer;
 }
 
@@ -214,18 +188,22 @@ void
 raop_buffer_destroy(raop_buffer_t *raop_buffer)
 {
 	if (raop_buffer) {
-		alac_free(raop_buffer->alac);
+	    aacDecoder_Close(raop_buffer->phandle);
 		free(raop_buffer->buffer);
 		free(raop_buffer);
 	}
-}
+#ifdef DUMP_AUDIO
+    if (file_aac != NULL) {
+        fclose(file_aac);
+    }
+    if (file_source != NULL) {
+        fclose(file_source);
+    }
+    if (file_pcm != NULL) {
+        fclose(file_pcm);
+    }
+#endif
 
-const ALACSpecificConfig *
-raop_buffer_get_config(raop_buffer_t *raop_buffer)
-{
-	assert(raop_buffer);
-
-	return &raop_buffer->alacConfig;
 }
 
 static short
@@ -234,69 +212,132 @@ seqnum_cmp(unsigned short s1, unsigned short s2)
 	return (s1 - s2);
 }
 
+short dithered_vol(int sample, int v) {
+    int out = sample * v;
+/*    if (v < 65536) {
+        out = (out + rand_a) - rand_b;
+    }*/
+    return (short) (out >> 16);
+}
+
 int
-raop_buffer_queue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned short datalen, int use_seqnum)
+stuff_buffer(short* input, short* output, int vol) {
+    int i;
+    int i2;
+    int l;
+    int stuffsamp = 480;
+    int l2 = 0;
+    int j = 0;
+    for (i = 0; i < stuffsamp; i++) {
+        i2 = j + 1;
+        l = l2 + 1;
+        output[j] = dithered_vol(input[l2], vol);
+        j = i2 + 1;
+        l2 = l + 1;
+        output[i2] = dithered_vol(input[l], vol);
+    }
+    return 480;
+}
+
+//#define DUMP_AUDIO
+
+#ifdef DUMP_AUDIO
+static FILE* file_aac = NULL;
+static FILE* file_source = NULL;
+static FILE* file_keyiv = NULL;
+static FILE* file_pcm = NULL;
+#endif
+
+
+int
+raop_buffer_queue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned short datalen, raop_callbacks_t *callbacks)
 {
-	unsigned char packetbuf[RAOP_PACKET_LEN];
-	unsigned short seqnum;
-	raop_buffer_entry_t *entry;
-	int encryptedlen;
-	AES_CTX aes_ctx;
-	int outputlen;
+    assert(raop_buffer);
+    int encryptedlen;
+    raop_buffer_entry_t *entry;
+#ifdef DUMP_AUDIO
+    if (file_aac == NULL) {
+        file_aac = fopen("/sdcard/audio.aac", "wb");
+        file_source = fopen("/sdcard/audio.source", "wb");
+        file_keyiv = fopen("/sdcard/audio.keyiv", "wb");
+        file_pcm = fopen("/sdcard/audio.pcm", "wb");
+    }
+#endif
 
-	assert(raop_buffer);
+    /* Check packet data length is valid */
+    if (datalen < 12 || datalen > RAOP_PACKET_LEN) {
+        return -1;
+    }
+    unsigned short seqnum = (data[2] << 8) | data[3];
+    if (datalen == 16 && data[12] == 0x0 && data[13] == 0x68 && data[14] == 0x34 && data[15] == 0x0) {
+        return 0;
+    }
+    int payloadsize = datalen - 12;
+#ifdef DUMP_AUDIO
+    // 未解密的文件
+    if (file_source != NULL) {
+        fwrite(&data[12], payloadsize, 1, file_source);
+    }
+#endif
+    //logger_log(raop_buffer->logger, LOGGER_DEBUG, "seqnum = %d payloadsize = %d", seqnum, payloadsize);
 
-	/* Check packet data length is valid */
-	if (datalen < 12 || datalen > RAOP_PACKET_LEN) {
-		return -1;
-	}
 
-	/* Get correct seqnum for the packet */
-	if (use_seqnum) {
-		seqnum = (data[2] << 8) | data[3];
-	} else {
-		seqnum = raop_buffer->first_seqnum;
-	}
-
-	/* If this packet is too late, just skip it */
 	if (!raop_buffer->is_empty && seqnum_cmp(seqnum, raop_buffer->first_seqnum) < 0) {
 		return 0;
 	}
-
 	/* Check that there is always space in the buffer, otherwise flush */
 	if (seqnum_cmp(seqnum, raop_buffer->first_seqnum+RAOP_BUFFER_LENGTH) >= 0) {
 		raop_buffer_flush(raop_buffer, seqnum);
 	}
-
-	/* Get entry corresponding our seqnum */
 	entry = &raop_buffer->entries[seqnum % RAOP_BUFFER_LENGTH];
 	if (entry->available && seqnum_cmp(entry->seqnum, seqnum) == 0) {
 		/* Packet resend, we can safely ignore */
 		return 0;
 	}
+    entry->flags = data[0];
+    entry->type = data[1];
+    entry->seqnum = seqnum;
+    // 第4个字节开始是pts
+    entry->timestamp = (data[4] << 24) | (data[5] << 16) |
+                       (data[6] << 8) | data[7];
+    entry->ssrc = (data[8] << 24) | (data[9] << 16) |
+                  (data[10] << 8) | data[11];
+    entry->available = 1;
 
-	/* Update the raop_buffer entry header */
-	entry->flags = data[0];
-	entry->type = data[1];
-	entry->seqnum = seqnum;
-	entry->timestamp = (data[4] << 24) | (data[5] << 16) |
-	                   (data[6] << 8) | data[7];
-	entry->ssrc = (data[8] << 24) | (data[9] << 16) |
-	              (data[10] << 8) | data[11];
-	entry->available = 1;
-
-	/* Decrypt audio data */
-	encryptedlen = (datalen-12)/16*16;
-	AES_set_key(&aes_ctx, raop_buffer->aeskey, raop_buffer->aesiv, AES_MODE_128);
-	AES_convert_key(&aes_ctx);
-	AES_cbc_decrypt(&aes_ctx, &data[12], packetbuf, encryptedlen);
-	memcpy(packetbuf+encryptedlen, &data[12+encryptedlen], datalen-12-encryptedlen);
-
-	/* Decode ALAC audio data */
-	outputlen = entry->audio_buffer_size;
-	alac_decode_frame(raop_buffer->alac, packetbuf,
-	                  entry->audio_buffer, &outputlen);
-	entry->audio_buffer_len = outputlen;
+    encryptedlen = payloadsize/16*16;
+    unsigned char packetbuf[payloadsize];
+    memset(packetbuf, 0, payloadsize);
+	// 需要在内部初始化
+    AES_CTX aes_ctx_audio;
+	AES_set_key(&aes_ctx_audio, raop_buffer->aeskey, raop_buffer->aesiv, AES_MODE_128);
+	AES_convert_key(&aes_ctx_audio);
+    AES_cbc_decrypt(&aes_ctx_audio, &data[12], packetbuf, encryptedlen);
+    memcpy(packetbuf+encryptedlen, &data[12+encryptedlen], payloadsize-encryptedlen);
+#ifdef DUMP_AUDIO
+    // 解密的文件
+    if (file_aac != NULL) {
+        fwrite(packetbuf, payloadsize, 1, file_aac);
+    }
+#endif
+	// aac解码pcm
+    int ret = 0;
+    int pkt_size = payloadsize;
+    UINT valid_size = payloadsize;
+    UCHAR *input_buf[1] = {packetbuf};
+    ret = aacDecoder_Fill(raop_buffer->phandle, input_buf, &pkt_size, &valid_size);
+    if (ret != AAC_DEC_OK) {
+        logger_log(raop_buffer->logger, LOGGER_ERR, "aacDecoder_Fill error : %x", ret);
+    }
+	ret = aacDecoder_DecodeFrame(raop_buffer->phandle, entry->audio_buffer, pcm_pkt_size, fdk_flags);
+	entry->audio_buffer_len = pcm_pkt_size;
+	if (ret != AAC_DEC_OK) {
+		logger_log(raop_buffer->logger, LOGGER_ERR, "aacDecoder_DecodeFrame error : 0x%x", ret);
+	}
+#ifdef DUMP_AUDIO
+    if (file_pcm != NULL) {
+        fwrite(entry->audio_buffer, entry->audio_buffer_len, 1, file_pcm);
+    }
+#endif
 
 	/* Update the raop_buffer seqnums */
 	if (raop_buffer->is_empty) {
@@ -307,17 +348,18 @@ raop_buffer_queue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned shor
 	if (seqnum_cmp(seqnum, raop_buffer->last_seqnum) > 0) {
 		raop_buffer->last_seqnum = seqnum;
 	}
-	return 1;
+
+    return 1;
 }
 
 const void *
-raop_buffer_dequeue(raop_buffer_t *raop_buffer, int *length, int no_resend)
+raop_buffer_dequeue(raop_buffer_t *raop_buffer, int *length, unsigned int* pts, int no_resend)
 {
 	short buflen;
 	raop_buffer_entry_t *entry;
 
 	/* Calculate number of entries in the current buffer */
-	buflen = seqnum_cmp(raop_buffer->last_seqnum, raop_buffer->first_seqnum)+1;
+	buflen = seqnum_cmp(raop_buffer->last_seqnum, raop_buffer->first_seqnum) + 1;
 
 	/* Cannot dequeue from empty buffer */
 	if (raop_buffer->is_empty || buflen <= 0) {
@@ -349,6 +391,7 @@ raop_buffer_dequeue(raop_buffer_t *raop_buffer, int *length, int no_resend)
 
 	/* Return entry audio buffer */
 	*length = entry->audio_buffer_len;
+	*pts = entry->timestamp;
 	entry->audio_buffer_len = 0;
 	return entry->audio_buffer;
 }
@@ -382,9 +425,7 @@ void
 raop_buffer_flush(raop_buffer_t *raop_buffer, int next_seq)
 {
 	int i;
-
 	assert(raop_buffer);
-
 	for (i=0; i<RAOP_BUFFER_LENGTH; i++) {
 		raop_buffer->entries[i].available = 0;
 		raop_buffer->entries[i].audio_buffer_len = 0;

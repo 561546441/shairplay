@@ -11,4 +11,5 @@ if HAVE_LIBAO
 
   shairplay_CFLAGS += $(libao_CFLAGS)
   shairplay_LDADD += $(libao_LIBS)
+
 endif

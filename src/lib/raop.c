@@ -32,6 +32,9 @@
 #include "logger.h"
 #include "compat.h"
 
+#include "raop_rtp_mirror.h"
+
+
 /* Actually 345 bytes for 2048-bit key */
 #define MAX_SIGNATURE_LEN 512
 
@@ -59,11 +62,14 @@ struct raop_s {
 
 	/* Password information */
 	char password[MAX_PASSWORD_LEN+1];
+
+	unsigned short port;
 };
 
 struct raop_conn_s {
 	raop_t *raop;
 	raop_rtp_t *raop_rtp;
+	raop_rtp_mirror_t *raop_rtp_mirror;
 	fairplay_t *fairplay;
 	pairing_session_t *pairing;
 
@@ -234,8 +240,6 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		handler = &raop_handler_fpsetup;
 	} else if (!strcmp(method, "OPTIONS")) {
 		handler = &raop_handler_options;
-	} else if (!strcmp(method, "ANNOUNCE")) {
-		handler = &raop_handler_announce;
 	} else if (!strcmp(method, "SETUP")) {
 		handler = &raop_handler_setup;
 	} else if (!strcmp(method, "GET_PARAMETER")) {

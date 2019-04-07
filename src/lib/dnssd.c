@@ -298,10 +298,17 @@ dnssd_register_airplay(dnssd_t *dnssd, const char *name, unsigned short port, co
 
 	dnssd->TXTRecordCreate(&txtRecord, 0, NULL);
 	dnssd->TXTRecordSetValue(&txtRecord, "deviceid", strlen(deviceid), deviceid);
-	dnssd->TXTRecordSetValue(&txtRecord, "features", strlen("0x5A7FFFF7,0xE"), "0x5A7FFFF7,0xE");
+	dnssd->TXTRecordSetValue(&txtRecord, "features", strlen("0x5A7FFFF7,0x1E"), "0x5A7FFFF7,0x1E");
 	dnssd->TXTRecordSetValue(&txtRecord, "model", strlen(GLOBAL_MODEL), GLOBAL_MODEL);
 	dnssd->TXTRecordSetValue(&txtRecord, "srcvers", strlen(GLOBAL_VERSION), GLOBAL_VERSION);
 	dnssd->TXTRecordSetValue(&txtRecord, "vv", 1, "2");
+	dnssd->TXTRecordSetValue(&txtRecord, "flags", strlen("0x4"), "0x4");
+	dnssd->TXTRecordSetValue(&txtRecord, "pw", strlen("false"), "false");
+	dnssd->TXTRecordSetValue(&txtRecord, "rhd", strlen("rhd"), "rhd");
+	dnssd->TXTRecordSetValue(&txtRecord, "pk", strlen("b07727d6f6cd6e08b58ede525ec3cdeaa252ad9f683feb212ef8a205246554e7"),
+							"b07727d6f6cd6e08b58ede525ec3cdeaa252ad9f683feb212ef8a205246554e7");
+	dnssd->TXTRecordSetValue(&txtRecord, "pi", strlen("2e388006-13ba-4041-9a67-25dd4a43d536"),
+							 "2e388006-13ba-4041-9a67-25dd4a43d536");
 
 	/* Register the service */
 	dnssd->DNSServiceRegister(&dnssd->airplayService, 0, 0,

@@ -77,6 +77,7 @@ AM_COND_IF([WITH_PLAYFAIR],
 	[AC_DEFINE([HAVE_FAIRPLAY], [1],
 	           [Define if you have the libdl library or equivalent.])])
 
+# AC_PROG_CXX
 
 AC_CONFIG_FILES(
 	[Makefile]
@@ -89,5 +90,6 @@ AC_CONFIG_FILES(
 	[src/lib/ed25519/Makefile]
 	[src/lib/playfair/Makefile]
 	[src/lib/plist/Makefile]
+	[src/lib/fdk-aac/Makefile]
 )
 AC_OUTPUT
